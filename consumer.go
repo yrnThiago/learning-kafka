@@ -1,48 +1,47 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/segmentio/kafka-go"
 )
 
 func main() {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
+	topic := "meu-topico"
+	partition := 0
 
-	brokers := []string{"localhost:9092"}
-
-	consumer, err := sarama.NewConsumer(brokers, config)
+	conn, err := kafka.DialLeader(context.Background(), "tcp", "localhost:9092", topic, partition)
 	if err != nil {
-		panic(err)
+		log.Fatal("failed to dial leader:", err)
 	}
 
-	defer consumer.Close()
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	batch := conn.ReadBatch(10e3, 1e6) // fetch 10KB min, 1MB max
 
-	partitionConsumer, err := consumer.ConsumePartition(
-		"meu-topico",
-		0,
-		sarama.OffsetOldest,
-	)
+	b := make([]byte, 10e3) // 10KB max per message
+	for {
+		n, err := batch.Read(b)
+		if err != nil {
+			break
+		}
+		fmt.Println(string(b[:n]))
+	}
 
-	if err != nil {
-		panic(err)
+	if err := batch.Close(); err != nil {
+		log.Fatal("failed to close batch:", err)
+	}
+
+	if err := conn.Close(); err != nil {
+		log.Fatal("failed to close connection:", err)
 	}
 
 	signalChannel := make(chan os.Signal)
 	signal.Notify(signalChannel, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
-
-	messages := partitionConsumer.Messages()
-	for {
-		select {
-		case msg := <-signalChannel:
-			fmt.Printf("Saindo da aplicação (%v)\n", msg)
-			return
-		case msg := <-messages:
-			fmt.Printf("Mensagem recebida %s \n", string(msg.Value))
-		}
-	}
+	<-signalChannel
 }
